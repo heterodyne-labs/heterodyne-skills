@@ -1,0 +1,13 @@
+{
+  "name": "aphelion-sdlc",
+  "version": "0.1.0",
+  "description": "Skills for aphelion's spec-driven agent loop: propose an OpenSpec change for an issue, finish and archive it in the same PR, file out-of-scope bugs, and triage new issues.",
+  "author": {
+    "name": "aphelion-labs",
+    "url": "https://github.com/aphelion-labs"
+  },
+  "homepage": "https://github.com/aphelion-labs/aphelion-skills",
+  "repository": "https://github.com/aphelion-labs/aphelion-skills",
+  "license": "Apache-2.0",
+  "keywords": ["aphelion", "openspec", "spec-driven", "github-issues"]
+}

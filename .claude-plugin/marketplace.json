@@ -1,0 +1,16 @@
+{
+  "name": "aphelion-skills",
+  "owner": {
+    "name": "aphelion-labs",
+    "url": "https://github.com/aphelion-labs"
+  },
+  "description": "Claude Code skills and their evals for the spec-driven agent loop of aphelion (github.com/aphelion-labs/aphelion).",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "aphelion-sdlc",
+      "source": "./plugins/aphelion-sdlc",
+      "description": "Skills for aphelion's issue-to-PR loop: issue-propose, issue-finish, file-bug and triage."
+    }
+  ]
+}
