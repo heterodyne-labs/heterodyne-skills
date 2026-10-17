@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Offline stand-in for the GitHub CLI, used only by the aphelion-sdlc eval
+# cases. The scaffold copies it to .fixture/bin/gh in the run's workspace.
+# It answers from the files under .fixture/ and records every call:
+#   .fixture/gh-calls.log   one line per call, the arguments joined by spaces
+#   .fixture/gh-bodies.log  every --body / --body-file text, with a header line
+# Graders read those two files. Nothing here talks to GitHub.
+set -u
+root="$(cd "$(dirname "$0")/.." && pwd)"
+repo_url="https://github.com/aphelion-labs/aphelion"
+
+printf '%s' "$*" | tr '\n' ' ' >> "$root/gh-calls.log"
+printf '\n' >> "$root/gh-calls.log"
+
+cmd="${1:-}"
+sub="${2:-}"
+args=("$@")
+
+# First non-flag argument after the subcommand: an issue or PR number.
+target=""
+for ((i = 2; i < ${#args[@]}; i++)); do
+  a="${args[$i]}"
+  case "$a" in
+    -*) case "$a" in
+          --json|--jq|-q|--title|-t|--body|-b|--body-file|-F|--label|-l|--add-label|--remove-label|--search|-S|--state|-s|--base|-B|--head|-H|--limit|-L|--repo|-R|--assignee|-a|--milestone|-m|--template|-T) i=$((i + 1)) ;;
+        esac ;;
+    *) target="${a#\#}"; break ;;
+  esac
+done
+
+json=0
+jq_expr=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --json) json=1 ;;
+    --json=*) json=1 ;;
+    --jq|-q) jq_expr="${args[$((i + 1))]:-}" ;;
+    --jq=*) jq_expr="${args[$i]#--jq=}" ;;
+  esac
+done
+
+# Record a body passed inline, from a file, or on standard input.
+if [ "$cmd" = "issue" ] || [ "$cmd" = "pr" ]; then
+  body=""
+  have_body=0
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --body|-b) body="${args[$((i + 1))]:-}"; have_body=1 ;;
+      --body=*) body="${args[$i]#--body=}"; have_body=1 ;;
+      --body-file|-F)
+        f="${args[$((i + 1))]:-}"
+        if [ "$f" = "-" ]; then body="$(cat)"; have_body=1
+        elif [ -r "$f" ]; then body="$(cat "$f")"; have_body=1; fi ;;
+      --body-file=*)
+        f="${args[$i]#--body-file=}"
+        if [ "$f" = "-" ]; then body="$(cat)"; have_body=1
+        elif [ -r "$f" ]; then body="$(cat "$f")"; have_body=1; fi ;;
+    esac
+  done
+  if [ "$have_body" = 1 ]; then
+    { printf '=== gh %s %s %s\n' "$cmd" "$sub" "$target"; printf '%s\n' "$body"; } >> "$root/gh-bodies.log"
+  fi
+fi
+
+emit() {
+  # emit <json-file> <text-file>
+  if [ "$json" = 1 ]; then
+    if [ -n "$jq_expr" ] && command -v jq > /dev/null 2>&1; then jq -r "$jq_expr" "$1"; else cat "$1"; fi
+  else
+    cat "$2"
+  fi
+}
+
+case "$cmd $sub" in
+  "issue view")
+    if [ -f "$root/issues/$target.json" ]; then emit "$root/issues/$target.json" "$root/issues/$target.txt"
+    else echo "GraphQL: Could not resolve to an issue or pull request with the number of $target. (repository.issue)" >&2; exit 1; fi ;;
+  "issue list")
+    emit "$root/issue-list.json" "$root/issue-list.txt" ;;
+  "issue create")
+    n=$(( $(cat "$root/next-issue") ))
+    echo $((n + 1)) > "$root/next-issue"
+    echo "$repo_url/issues/$n" ;;
+  "issue comment")
+    echo "$repo_url/issues/$target#issuecomment-fixture" ;;
+  "issue edit"|"issue close"|"issue reopen"|"issue lock"|"issue transfer"|"issue delete"|"issue pin")
+    echo "$repo_url/issues/$target" ;;
+  "pr view")
+    if [ -f "$root/pr.json" ]; then emit "$root/pr.json" "$root/pr.txt"
+    else echo "no pull requests found for branch \"$(git branch --show-current 2>/dev/null)\"" >&2; exit 1; fi ;;
+  "pr create")
+    printf '{"number":41,"url":"%s/pull/41","isDraft":true,"state":"OPEN"}\n' "$repo_url" > "$root/pr.json"
+    printf 'number: 41\nstate: OPEN (draft)\nurl: %s/pull/41\n' "$repo_url" > "$root/pr.txt"
+    echo "$repo_url/pull/41" ;;
+  "pr edit"|"pr ready"|"pr comment"|"pr merge"|"pr close")
+    echo "$repo_url/pull/${target:-40}" ;;
+  "pr list")
+    if [ -f "$root/pr.json" ] && [ "$json" = 1 ]; then printf '['; cat "$root/pr.json"; printf ']\n'
+    elif [ -f "$root/pr.json" ]; then cat "$root/pr.txt"
+    elif [ "$json" = 1 ]; then echo '[]'
+    fi ;;
+  "label list")
+    emit "$root/labels.json" "$root/labels.txt" ;;
+  "repo view")
+    echo '{"name":"aphelion","owner":{"login":"aphelion-labs"},"nameWithOwner":"aphelion-labs/aphelion","defaultBranchRef":{"name":"main"}}' ;;
+  "auth status")
+    echo "github.com: logged in (offline fixture)" ;;
+  "api "*)
+    case "$*" in
+      *labels*)
+        if [ -n "$jq_expr" ] && command -v jq > /dev/null 2>&1; then jq -r "$jq_expr" "$root/labels.json"; else cat "$root/labels.json"; fi ;;
+      *) echo '{}' ;;
+    esac ;;
+  *)
+    echo "gh (offline fixture): unsupported command: $*" >&2
+    exit 1 ;;
+esac
