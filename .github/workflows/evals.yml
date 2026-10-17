@@ -1,0 +1,139 @@
+# Validates the marketplace and plugin manifests, and runs the aphelion-sdlc
+# eval suite with `claude plugin eval` (ADR 0012).
+#
+# Cost: every eval run and every llm grader is a real model call on the owner's
+# Claude subscription, through the CLAUDE_CODE_OAUTH_TOKEN secret made with
+# `claude setup-token` (Claude Code docs: authentication, plugin evals). It
+# draws on the same plan limits as the implementation agents (ADR 0010). Which
+# credential pays for CI evals is an open decision (ADR 0012), so the eval job
+# runs only on manual dispatch until the owner sets the repository variable
+# EVALS_ENABLED to 'true'; after that it also runs on pull requests. The
+# validate job makes no model calls and always runs.
+name: evals
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # Only changes that can alter the plugin or this workflow.
+    paths:
+      - ".claude-plugin/**"
+      - "plugins/**"
+      - ".github/workflows/evals.yml"
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request cancels the older run, so a stale
+# suite does not keep spending subscription usage.
+concurrency:
+  group: evals-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Claude Code version these files were validated with on 2026-10-17;
+  # `claude plugin eval` needs 2.1.269 or later (Claude Code docs).
+  CLAUDE_CODE_VERSION: "2.1.302"
+  # Keep the pinned version for the whole job (Claude Code docs: setup).
+  DISABLE_AUTOUPDATER: "1"
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # From the marketplace root, validate does not open the plugin's own
+      # files, so the plugin directory is validated separately (Claude Code
+      # docs: plugin validate).
+      - name: Validate marketplace and plugin
+        run: |
+          claude plugin validate . --strict
+          claude plugin validate plugins/aphelion-sdlc --strict
+
+  evals:
+    needs: validate
+    # Fork pull requests never run it; they get no secrets anyway (ADR 0010).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.EVALS_ENABLED == 'true' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    # Ubuntu 24.04 is the image the sandbox step below is documented for.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # The cases run OpenSpec through npx; OpenSpec 1.14.2 declares
+      # engines node >=20.19.0 (npm registry, checked 2026-10-17).
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ">=20.19.0"
+
+      # Granting Bash to eval runs needs Claude Code's OS sandbox. On Linux it
+      # relies on bubblewrap and socat, and Ubuntu 24.04's AppArmor policy
+      # needs a bwrap profile (Claude Code docs: sandboxing).
+      - name: Install sandbox prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
+            printf '%s\n' \
+              'abi <abi/4.0>,' \
+              'include <tunables/global>' \
+              '' \
+              'profile bwrap /usr/bin/bwrap flags=(unconfined) {' \
+              '  userns,' \
+              '  include if exists <local/bwrap>' \
+              '}' | sudo tee /etc/apparmor.d/bwrap > /dev/null
+            sudo systemctl reload apparmor
+          fi
+
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Command and flags: plugins/aphelion-sdlc/evals/README.md.
+      # Pass/fail threshold, runs per case, baseline arm and cost ceiling are
+      # open decisions (ADR 0012). Until the owner records them, the CLI
+      # defaults apply; the owner can pass those flags through the repository
+      # variable EVALS_EXTRA_ARGS without editing this file.
+      - name: Run evals
+        working-directory: plugins/aphelion-sdlc
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          EVALS_EXTRA_ARGS: ${{ vars.EVALS_EXTRA_ARGS }}
+        run: |
+          read -r -a extra <<< "$EVALS_EXTRA_ARGS"
+          set +e
+          claude plugin eval . \
+            --scaffold \
+            --trust-plugin \
+            --model claude-opus-5-5 \
+            --judge-model claude-haiku-5-5 \
+            --no-publish \
+            "${extra[@]}" \
+            --allow-tools Bash Write Edit "WebFetch(domain:registry.npmjs.org)" \
+            --json results.json
+          status=$?
+          set -e
+          echo "claude plugin eval exit code $status: 0 passed; 1 a case below the threshold, or a load, trust or API error; 2 partial run (cost ceiling or rejected credential); 130 interrupted; 143 terminated."
+          exit "$status"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: eval-results
+          path: |
+            plugins/aphelion-sdlc/results.json
+            plugins/aphelion-sdlc/evals/results/
+          if-no-files-found: ignore
