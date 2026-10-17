@@ -1,0 +1,3 @@
+# claude plugin eval writes each run here (Claude Code docs, plugin evals)
+plugins/aphelion-sdlc/evals/results/
+plugins/aphelion-sdlc/results.json
